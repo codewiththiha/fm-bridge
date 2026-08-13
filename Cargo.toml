@@ -1,0 +1,48 @@
+[package]
+name = "fm-bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Idiomatic async Rust bindings for Apple's on-device Foundation Models framework, via a Swift helper binary."
+documentation = "https://docs.rs/fm-bridge"
+repository = "https://github.com/codewiththiha/apple-bridge"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["apple", "llm", "foundation-models", "ai", "on-device"]
+categories = ["api-bindings", "asynchronous"]
+exclude = ["swift/.build/*"]
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["process", "io-util", "rt", "time", "sync"] }
+futures-core = "0.3.34"
+async-stream = "0.3.6"
+tracing = { version = "0.1.44", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "process", "io-util", "time", "sync"] }
+futures = "0.3.34"
+tempfile = "3.27.0"
+
+[features]
+default = []
+# Emits `tracing` spans/events around process spawn and IPC.
+tracing = ["dep:tracing"]
+
+[package.metadata.docs.rs]
+all-features = true
+targets = ["aarch64-apple-darwin"]
+
+[[example]]
+name = "stream_text"
+
+[[example]]
+name = "structured_json"
+
+[[example]]
+name = "chat"
+
+[[example]]
+name = "concurrent"
