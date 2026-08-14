@@ -608,7 +608,8 @@ pub(crate) fn parse_line(line: &str) -> Result<Option<StreamEvent>> {
             .get("code")
             .and_then(|c| c.as_str())
             .unwrap_or("generation_failed");
-        return Err(Error::from_code(code, message.to_string()));
+        let reason = object.get("reason").and_then(|r| r.as_str());
+        return Err(Error::from_code(code, message.to_string(), reason));
     }
 
     if object.get("done").and_then(serde_json::Value::as_bool) == Some(true) {

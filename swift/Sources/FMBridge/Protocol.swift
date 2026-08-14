@@ -101,8 +101,12 @@ enum Outbound {
         ])
     }
 
-    static func error(_ message: String, code: String) {
-        emit(["error": message, "code": code])
+    static func error(_ message: String, code: String, reason: String? = nil) {
+        var payload: [String: Any] = ["error": message, "code": code]
+        if let reason {
+            payload["reason"] = reason
+        }
+        emit(payload)
     }
 
     static func ready(_ info: [String: Any]) {
@@ -115,9 +119,11 @@ enum Outbound {
 struct BridgeError: Error {
     let code: String
     let message: String
+    /// Only set for `model_unavailable`, where the cause is actionable.
+    var reason: String?
 
-    static func unavailable(_ message: String) -> BridgeError {
-        BridgeError(code: "model_unavailable", message: message)
+    static func unavailable(_ message: String, reason: String? = nil) -> BridgeError {
+        BridgeError(code: "model_unavailable", message: message, reason: reason)
     }
     static func badRequest(_ message: String) -> BridgeError {
         BridgeError(code: "bad_request", message: message)

@@ -103,6 +103,23 @@ func availabilityMessage(_ reason: SystemLanguageModel.Availability.UnavailableR
     }
 }
 
+/// Stable machine-readable token for an unavailability reason.
+///
+/// Sent alongside the prose message so the Rust side can branch on the cause
+/// without matching on wording that may change between OS releases.
+func availabilityReason(_ reason: SystemLanguageModel.Availability.UnavailableReason) -> String {
+    switch reason {
+    case .deviceNotEligible:
+        return "device_not_eligible"
+    case .appleIntelligenceNotEnabled:
+        return "not_enabled"
+    case .modelNotReady:
+        return "model_not_ready"
+    @unknown default:
+        return "unknown"
+    }
+}
+
 /// Parses `GeneratedContent.jsonString` into a `JSONSerialization` object graph
 /// so it can be re-emitted as a nested value instead of an escaped string.
 func jsonObject(from content: GeneratedContent) -> Any {
@@ -127,9 +144,15 @@ func handle(_ request: BridgeRequest) async throws {
     case .available:
         break
     case .unavailable(let reason):
-        throw BridgeError.unavailable(availabilityMessage(reason))
+        throw BridgeError.unavailable(
+            availabilityMessage(reason),
+            reason: availabilityReason(reason)
+        )
     @unknown default:
-        throw BridgeError.unavailable("the on-device model is unavailable right now")
+        throw BridgeError.unavailable(
+            "the on-device model is unavailable right now",
+            reason: "unknown"
+        )
     }
 
     let (instructionText, promptText) = buildPrompt(from: request.messages)
@@ -231,13 +254,30 @@ struct FMBridgeMain {
             let model = SystemLanguageModel.default
             switch model.availability {
             case .available:
-                Outbound.ready(["available": true, "supportedLanguages": true])
+                // Report what the model can actually do, so callers can size
+                // prompts and check locale support without a trial generation.
+                let languages = model.supportedLanguages
+                    .map(\.maximalIdentifier)
+                    .sorted()
+                Outbound.ready([
+                    "available": true,
+                    "contextSize": model.contextSize,
+                    "supportedLanguages": languages,
+                ])
                 exit(0)
             case .unavailable(let reason):
-                Outbound.error(availabilityMessage(reason), code: "model_unavailable")
+                Outbound.error(
+                    availabilityMessage(reason),
+                    code: "model_unavailable",
+                    reason: availabilityReason(reason)
+                )
                 exit(3)
             @unknown default:
-                Outbound.error("unknown availability state", code: "model_unavailable")
+                Outbound.error(
+                    "unknown availability state",
+                    code: "model_unavailable",
+                    reason: "unknown"
+                )
                 exit(3)
             }
         }
@@ -265,7 +305,11 @@ struct FMBridgeMain {
             FileHandle.standardError.write(
                 Data("FMBridge: \(bridgeError.code): \(bridgeError.message)\n".utf8)
             )
-            Outbound.error(bridgeError.message, code: bridgeError.code)
+            Outbound.error(
+                bridgeError.message,
+                code: bridgeError.code,
+                reason: bridgeError.reason
+            )
             exit(1)
         }
     }
