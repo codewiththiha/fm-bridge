@@ -69,6 +69,31 @@ match bridge.check_availability().await {
 }
 ```
 
+When it fails, branch on the *reason* rather than the message — the wording is
+for humans and may change, the token will not:
+
+```rust
+use fm_bridge::{Error, Unavailable};
+
+match bridge.check_availability().await {
+    Ok(()) => { /* go ahead */ }
+    Err(Error::ModelUnavailable { reason, message }) => match reason {
+        // Transient: assets are still coming down. Back off and retry.
+        Unavailable::ModelNotReady => schedule_retry(),
+        // Actionable by the user.
+        Unavailable::NotEnabled => prompt_user_to_enable_apple_intelligence(),
+        // Permanent on this machine — hide the feature entirely.
+        Unavailable::DeviceNotEligible | Unavailable::OsTooOld => hide_ai_features(),
+        _ => eprintln!("unavailable: {message}"),
+    },
+    Err(error) => eprintln!("{error}"),
+}
+```
+
+`Error::is_retryable()` already encodes this distinction, so
+`Unavailable::ModelNotReady` reports `true` while an ineligible device reports
+`false`.
+
 ## Usage
 
 ### Streaming text
@@ -276,10 +301,14 @@ Response events, one JSON object per line:
 | `{"snapshot":{...}}` | Partially-filled structured object |
 | `{"structured":{...}}` | Final structured object |
 | `{"done":true,"usage":{...}}` | Generation finished |
-| `{"error":"...","code":"..."}` | Failure |
-| `{"ready":{...}}` | Reply to `--probe` |
+| `{"error":"...","code":"...","reason":"..."}` | Failure (`reason` only on `model_unavailable`) |
+| `{"ready":{"available":true,"contextSize":N,"supportedLanguages":[...]}}` | Reply to `--probe` |
 
 Error codes: `model_unavailable`, `bad_request`, `schema_invalid`, `guardrail_violation`, `context_exceeded`, `generation_failed`, `unsupported_locale`, `concurrent_requests`. Unknown codes degrade to `Error::Generation`, so the helper can add new ones without breaking older crates.
+
+Unavailability reasons: `device_not_eligible`, `not_enabled`, `model_not_ready`, `os_too_old`. These map onto [`Unavailable`]; an unrecognised token becomes `Unavailable::Unknown` rather than being mistaken for a known cause.
+
+[`Unavailable`]: https://docs.rs/fm-bridge/latest/fm_bridge/enum.Unavailable.html
 
 Exit codes: `0` success, `1` generation error, `2` malformed request, `3` model unavailable (`--probe`).
 
@@ -517,10 +546,18 @@ Run the probe to see the specific reason:
 .build/release/FMBridge --probe
 ```
 
-`deviceNotEligible` means Intel hardware or an unsupported region;
-`appleIntelligenceNotEnabled` means it is off in System Settings;
-`modelNotReady` means macOS is still downloading the model — wait and retry
-(`Error::is_retryable()` returns `true` for this case).
+The `reason` field says which case you hit, and it is also surfaced in Rust as
+`Error::ModelUnavailable { reason, .. }`:
+
+| `reason` | `Unavailable` | Meaning |
+|---|---|---|
+| `device_not_eligible` | `DeviceNotEligible` | Intel hardware or unsupported silicon — permanent |
+| `not_enabled` | `NotEnabled` | Switched off in System Settings — the user can fix it |
+| `model_not_ready` | `ModelNotReady` | Assets still downloading — wait and retry |
+| `os_too_old` | `OsTooOld` | Host predates macOS 26 — permanent |
+
+`Error::is_retryable()` returns `true` only for `model_not_ready`; the other
+causes will not resolve on their own, so retrying them just burns time.
 
 ### `Error::BinaryNotFound`
 

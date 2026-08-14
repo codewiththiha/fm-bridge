@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use fm_bridge::{
-    Bridge, Completion, Error, Request, Sampling, Schema, SchemaProperty, StreamEvent,
+    Bridge, Completion, Error, Request, Sampling, Schema, SchemaProperty, StreamEvent, Unavailable,
 };
 use futures::StreamExt;
 
@@ -274,7 +274,7 @@ async fn typed_error_codes_map_to_error_variants() {
             .unwrap_err();
 
         let matched = match (code, &error) {
-            ("model_unavailable", Error::ModelUnavailable(m)) => m == message,
+            ("model_unavailable", Error::ModelUnavailable { message: m, .. }) => m == message,
             ("bad_request", Error::BadRequest(m)) => m == message,
             ("schema_invalid", Error::InvalidSchema(m)) => m == message,
             ("guardrail_violation", Error::GuardrailViolation(m)) => m == message,
@@ -418,9 +418,53 @@ async fn probe_reports_why_the_model_is_unavailable() {
     let error = bridge.check_availability().await.unwrap_err();
 
     match error {
-        Error::ModelUnavailable(message) => assert!(message.contains("System Settings")),
+        Error::ModelUnavailable { reason, message } => {
+            assert_eq!(reason, Unavailable::NotEnabled);
+            assert!(message.contains("System Settings"));
+        }
         other => panic!("expected ModelUnavailable, got {other:?}"),
     }
+}
+
+/// A model that is still downloading is worth retrying; an ineligible device
+/// never becomes eligible, so the two must not be conflated.
+#[tokio::test]
+async fn probe_distinguishes_transient_from_permanent_unavailability() {
+    let cases = [
+        ("model_not_ready", Unavailable::ModelNotReady, true),
+        ("device_not_eligible", Unavailable::DeviceNotEligible, false),
+        ("not_enabled", Unavailable::NotEnabled, false),
+    ];
+
+    for (token, expected, retryable) in cases {
+        let (_dir, bridge) = mock_with_env("mock_probe.sh", &[("MOCK_UNAVAILABLE", token)]);
+        let error = bridge.check_availability().await.unwrap_err();
+
+        match &error {
+            Error::ModelUnavailable { reason, .. } => assert_eq!(*reason, expected),
+            other => panic!("expected ModelUnavailable for {token}, got {other:?}"),
+        }
+        assert_eq!(
+            error.is_retryable(),
+            retryable,
+            "{token} should{} be retryable",
+            if retryable { "" } else { " not" }
+        );
+    }
+}
+
+/// An unrecognised reason token must degrade to `Unknown` rather than being
+/// misread as one of the known causes.
+#[tokio::test]
+async fn probe_tolerates_an_unknown_unavailability_reason() {
+    let (_dir, bridge) = mock_with_env("mock_probe.sh", &[("MOCK_UNAVAILABLE", "from_the_future")]);
+    let error = bridge.check_availability().await.unwrap_err();
+
+    match &error {
+        Error::ModelUnavailable { reason, .. } => assert_eq!(*reason, Unavailable::Unknown),
+        other => panic!("expected ModelUnavailable, got {other:?}"),
+    }
+    assert!(!error.is_retryable());
 }
 
 // ── Process hygiene ─────────────────────────────────────────────────────────

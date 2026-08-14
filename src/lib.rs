@@ -149,7 +149,7 @@ mod error;
 mod types;
 
 pub use client::{BINARY_ENV_VAR, Bridge, DEFAULT_MAX_CONCURRENCY};
-pub use error::{Error, Result};
+pub use error::{Error, Result, Unavailable};
 pub use types::{
     Completion, Message, Request, Role, Sampling, Schema, SchemaProperty, SchemaType, StreamEvent,
     Usage,
@@ -322,7 +322,7 @@ mod tests {
             let error = parse_line(line).unwrap_err();
             let matched = matches!(
                 (code, &error),
-                ("model_unavailable", Error::ModelUnavailable(_))
+                ("model_unavailable", Error::ModelUnavailable { .. })
                     | ("bad_request", Error::BadRequest(_))
                     | ("schema_invalid", Error::InvalidSchema(_))
                     | ("guardrail_violation", Error::GuardrailViolation(_))
