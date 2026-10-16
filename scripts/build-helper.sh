@@ -13,8 +13,10 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-# FoundationModels ships only in Xcode's macOS 26 SDK, never in the CLT.
-if [[ -z "${DEVELOPER_DIR:-}" ]]; then
+# FoundationModels needs a macOS 26 SDK: recent Command Line Tools or Xcode.
+sdk_major="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null | cut -d. -f1 || true)"
+case "$sdk_major" in ''|*[!0-9]*) sdk_major=0 ;; esac
+if [[ -z "${DEVELOPER_DIR:-}" && "$sdk_major" -lt 26 ]]; then
   active="$(xcode-select -p 2>/dev/null || true)"
   if [[ "$active" != *"/Xcode"*".app/Contents/Developer" ]]; then
     best_dev=""

@@ -458,9 +458,10 @@ It means `xcode-select` is pointing at the CLT rather than Xcode:
 xcode-select -p    # prints /Library/Developer/CommandLineTools if so
 ```
 
-`scripts/build-helper.sh` handles this automatically — when the active
-toolchain is the CLT it selects the newest installed Xcode that carries a
-macOS 26 SDK and reports what it picked. To fix it globally instead:
+`scripts/build-helper.sh` handles this automatically. Command Line Tools
+with a macOS 26 SDK build the helper as they are; with an older SDK, the
+script selects the newest installed Xcode that carries one and reports what
+it picked. To fix it globally instead:
 
 ```bash
 sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
