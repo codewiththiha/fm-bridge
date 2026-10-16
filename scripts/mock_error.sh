@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Mimics FMBridge failing with a typed error code.
-# Override the code/message with MOCK_ERROR_CODE / MOCK_ERROR_MESSAGE.
+# Fails with MOCK_ERROR_CODE and MOCK_ERROR_MESSAGE.
 set -euo pipefail
 read -r _request || true
 

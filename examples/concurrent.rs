@@ -1,14 +1,8 @@
-//! Running several requests at once against one shared bridge.
+//! Several requests through one bridge; extras queue.
 //!
-//! ```text
-//! cargo run --example concurrent
-//! cargo run --example concurrent -- 4        # allow 4 in flight
-//! ```
-//!
-//! A bridge runs **one** request at a time unless you say otherwise, because
-//! the on-device model is a single shared resource. `max_concurrency` raises
-//! that ceiling; anything over the limit queues rather than failing, and every
-//! caller gets the answer to its own prompt.
+//! Run: `cargo run --example concurrent -- 4`
+
+#![allow(clippy::indexing_slicing)]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -30,7 +24,6 @@ const PROMPTS: &[&str] = &[
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // First CLI argument sets the limit; the default of 1 is fully serial.
     let limit: usize = std::env::args()
         .nth(1)
         .and_then(|arg| arg.parse().ok())
@@ -38,8 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bridge = Bridge::discover()?
         .max_concurrency(limit)
-        // The timeout covers queue time as well as generation, so a backlog
-        // surfaces as `Error::Timeout` instead of an unbounded wait.
+        // Queue time counts, so a backlog ends in `Error::Timeout`.
         .timeout(Duration::from_secs(120));
 
     bridge.check_availability().await?;
@@ -50,9 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bridge.max_concurrency_limit()
     );
 
-    // Samples how many slots are actually in use, to show the limit holding.
-    // Counting at the call site would just count *queued* tasks — the useful
-    // number is how many helper processes the bridge is really running.
+    // Running helpers, not queued tasks.
     let peak = Arc::new(AtomicUsize::new(0));
     let sampler = {
         let bridge = bridge.clone();
@@ -73,7 +63,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .enumerate()
         .map(|(index, prompt)| {
-            // Clones share the parent's budget, so spawning freely is safe.
             let bridge = bridge.clone();
 
             tokio::spawn(async move {
@@ -88,8 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    // Collect into a fixed-size slot per task so output order matches the
-    // prompt order even though completion order will not.
+    // Prompt order, whatever order answers arrive in.
     let mut answers: Vec<Option<String>> = vec![None; PROMPTS.len()];
     let mut failures = 0usize;
 
@@ -101,8 +89,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(error) => {
                 failures += 1;
-                // A saturated bridge reports a retryable timeout; other errors
-                // (guardrails, context limits) are per-request and final.
                 let hint = if error.is_retryable() {
                     " (retryable)"
                 } else {

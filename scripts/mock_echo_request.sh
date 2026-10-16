@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Echoes the request it received back as the response text, so tests can assert
-# on the exact JSON the Rust crate put on the wire.
+# Answers with the request line it received.
 set -euo pipefail
 read -r request || true
 

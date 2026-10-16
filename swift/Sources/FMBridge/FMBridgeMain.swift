@@ -3,8 +3,7 @@ import FoundationModels
 
 // MARK: - Prompt assembly
 
-/// Splits the message list into system instructions and a flattened prompt.
-/// Consecutive `system` messages are joined; everything else becomes transcript.
+/// System messages become instructions; the rest a flat transcript.
 func buildPrompt(from messages: [BridgeMessage]) -> (instructions: String?, prompt: String) {
     var systemParts: [String] = []
     var turns: [String] = []
@@ -20,9 +19,7 @@ func buildPrompt(from messages: [BridgeMessage]) -> (instructions: String?, prom
         }
     }
 
-    // A single trailing user message is by far the common case; sending it bare
-    // (no "User:" prefix) matches how the model was trained and measurably
-    // improves output quality.
+    // A lone user turn goes bare: the model answers it better.
     let prompt: String
     if turns.count == 1, let only = turns.first, only.hasPrefix("User: ") {
         prompt = String(only.dropFirst("User: ".count))
@@ -34,9 +31,7 @@ func buildPrompt(from messages: [BridgeMessage]) -> (instructions: String?, prom
     return (instructions, prompt)
 }
 
-/// Rough token estimate (~4 chars/token). The framework does not expose real
-/// token counts to third-party callers, so this is explicitly an approximation
-/// and is documented as such on the Rust side.
+/// About four characters a token; the framework exposes no tokenizer.
 func estimateTokens(_ text: String) -> Int {
     max(1, text.count / 4)
 }
@@ -49,18 +44,9 @@ func makeOptions(from request: BridgeRequest) -> GenerationOptions {
         samplingMode = .random(top: topK, seed: request.seed)
     }
 
-    // Apple renamed this parameter during the macOS 26 cycle: `sampling:` is
-    // deprecated in favour of `samplingMode:`.
-    //
-    // `samplingMode:` is `@backDeployed(before: macOS 27.0)`, so the compiler
-    // emits its implementation into this binary and it runs correctly on
-    // macOS 26 — there is no runtime availability cost to preferring it.
-    //
-    // If you are building against an early 26.x SDK from before the rename and
-    // this line fails with "incorrect argument label", change `samplingMode:`
-    // back to `sampling:`; the two are otherwise identical.
+    // `sampling:` builds on every 26.x SDK; `samplingMode:` only on newer.
     return GenerationOptions(
-        samplingMode: samplingMode,
+        sampling: samplingMode,
         temperature: request.temperature,
         maximumResponseTokens: request.maxTokens
     )
@@ -82,6 +68,14 @@ func classify(_ error: Error) -> BridgeError {
         case .concurrentRequests:
             return BridgeError(code: "concurrent_requests",
                                message: "the session is already responding to another request")
+        case .rateLimited:
+            return BridgeError(code: "rate_limited",
+                               message: "the system is rate limiting on-device generation")
+        case .assetsUnavailable:
+            return .unavailable("the model assets are unavailable right now",
+                                reason: "model_not_ready")
+        case .refusal:
+            return BridgeError(code: "refusal", message: "the model declined to answer")
         default:
             return .generation(generationError.localizedDescription)
         }
@@ -103,10 +97,7 @@ func availabilityMessage(_ reason: SystemLanguageModel.Availability.UnavailableR
     }
 }
 
-/// Stable machine-readable token for an unavailability reason.
-///
-/// Sent alongside the prose message so the Rust side can branch on the cause
-/// without matching on wording that may change between OS releases.
+/// A stable token Rust branches on; the message may be reworded.
 func availabilityReason(_ reason: SystemLanguageModel.Availability.UnavailableReason) -> String {
     switch reason {
     case .deviceNotEligible:
@@ -120,8 +111,7 @@ func availabilityReason(_ reason: SystemLanguageModel.Availability.UnavailableRe
     }
 }
 
-/// Parses `GeneratedContent.jsonString` into a `JSONSerialization` object graph
-/// so it can be re-emitted as a nested value instead of an escaped string.
+/// Nested JSON rather than an escaped string.
 func jsonObject(from content: GeneratedContent) -> Any {
     let raw = content.jsonString
     guard let data = raw.data(using: .utf8),
@@ -160,8 +150,6 @@ func handle(_ request: BridgeRequest) async throws {
         throw BridgeError.badRequest("request contains no user or assistant message")
     }
 
-    // `Instructions` and `Prompt` are both built from runtime strings here
-    // rather than the @-builder DSL, which only accepts literals.
     let session = instructionText.map { LanguageModelSession(instructions: Instructions($0)) }
         ?? LanguageModelSession()
 
@@ -171,17 +159,11 @@ func handle(_ request: BridgeRequest) async throws {
     let shouldStream = request.stream ?? true
 
     if let schemaConfig = request.schema {
-        // ── Structured generation ────────────────────────────────────────────
-        // Contrary to a common misconception, guided generation *does* stream:
-        // `streamResponse(to:schema:)` yields `ResponseStream<GeneratedContent>`
-        // snapshots of the partially-filled object.
         let schema = try SchemaBuilder.buildRoot(from: schemaConfig)
 
         if shouldStream && (request.streamStructured ?? false) {
             let stream = session.streamResponse(to: prompt, schema: schema, options: options)
-            // Snapshots are cumulative, so the last one *is* the final object.
-            // Iterating consumes the stream, so we must not also call
-            // `collect()` here — we keep the last snapshot instead.
+            // Snapshots are cumulative: the last one is the answer.
             var latest: GeneratedContent?
             for try await snapshot in stream {
                 latest = snapshot.content
@@ -208,16 +190,13 @@ func handle(_ request: BridgeRequest) async throws {
     }
 
     if shouldStream {
-        // ── Streaming text ───────────────────────────────────────────────────
-        // Snapshots are *cumulative*, so deltas are derived by diffing against
-        // what we already emitted. Diffing on Character (not UTF-16 offsets)
-        // keeps grapheme clusters and emoji intact.
+        // Cumulative snapshots, diffed by Character to keep graphemes whole.
         let stream = session.streamResponse(to: prompt, options: options)
         var emitted = ""
         for try await snapshot in stream {
             let text = snapshot.content
             guard text.count > emitted.count else {
-                // A snapshot can rewrite earlier text; fall back to a full resend.
+                // A rewrite of earlier text is resent whole.
                 if text != emitted, !text.isEmpty {
                     emitted = text
                     Outbound.delta(text)
@@ -230,7 +209,6 @@ func handle(_ request: BridgeRequest) async throws {
         }
         Outbound.done(promptTokens: promptTokens, completionTokens: estimateTokens(emitted))
     } else {
-        // ── Non-streaming text ───────────────────────────────────────────────
         let response = try await session.respond(to: prompt, options: options)
         Outbound.delta(response.content)
         Outbound.done(
@@ -242,20 +220,14 @@ func handle(_ request: BridgeRequest) async throws {
 
 // MARK: - Entry point
 
-/// Reads one NDJSON request from stdin, serves it, and exits. One process per
-/// request keeps the memory model trivial and guarantees the model resources
-/// are released; the Rust side sets `kill_on_drop` so an abandoned stream
-/// cannot leak a daemon.
+/// Serves one NDJSON request from stdin, then exits.
 @main
 struct FMBridgeMain {
     static func main() async {
-        // `--probe` lets callers check availability without spending a generation.
         if CommandLine.arguments.contains("--probe") {
             let model = SystemLanguageModel.default
             switch model.availability {
             case .available:
-                // Report what the model can actually do, so callers can size
-                // prompts and check locale support without a trial generation.
                 let languages = model.supportedLanguages
                     .map(\.maximalIdentifier)
                     .sorted()

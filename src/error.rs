@@ -1,191 +1,212 @@
-//! Error types for the crate.
-
 use std::path::PathBuf;
+use std::time::Duration;
 
-/// Why Apple Intelligence is not usable on this machine.
-///
-/// The helper reports this as a stable machine-readable token alongside the
-/// human-readable message, so callers can branch on the *cause* without
-/// pattern-matching on prose that may be reworded at any time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Why Apple Intelligence can't serve requests on this Mac.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Unavailable {
-    /// The hardware cannot run Apple Intelligence (Intel, or a Mac whose
-    /// silicon is not supported). Nothing the user does will fix this.
+    /// Intel or unsupported silicon. Permanent.
     DeviceNotEligible,
-    /// The device is capable but Apple Intelligence is switched off in
-    /// System Settings. The user can fix this.
+    /// Switched off in System Settings. The user can fix it.
     NotEnabled,
-    /// Model assets are still downloading or being prepared. This is
-    /// transient — the same request may succeed shortly.
+    /// Model assets are still downloading. Transient.
     ModelNotReady,
-    /// The host is older than macOS 26, so `FoundationModels` is absent.
+    /// macOS older than 26. Permanent until an upgrade.
     OsTooOld,
-    /// The helper reported a reason this version of the crate does not know,
-    /// most likely one introduced by a newer SDK.
+    /// A reason this crate doesn't know yet.
     Unknown,
 }
 
 impl Unavailable {
-    /// Maps the helper's wire token to a reason.
     pub(crate) fn from_token(token: &str) -> Self {
         match token {
-            "device_not_eligible" => Unavailable::DeviceNotEligible,
-            "not_enabled" => Unavailable::NotEnabled,
-            "model_not_ready" => Unavailable::ModelNotReady,
-            "os_too_old" => Unavailable::OsTooOld,
-            _ => Unavailable::Unknown,
+            "device_not_eligible" => Self::DeviceNotEligible,
+            "not_enabled" => Self::NotEnabled,
+            "model_not_ready" => Self::ModelNotReady,
+            "os_too_old" => Self::OsTooOld,
+            _ => Self::Unknown,
         }
     }
 
-    /// Whether waiting and trying again could plausibly succeed.
-    ///
-    /// Only [`ModelNotReady`](Self::ModelNotReady) is transient; an ineligible
-    /// device, a disabled setting, or an old OS all need human intervention.
+    /// Whether waiting could fix it without the user.
     pub fn is_transient(self) -> bool {
-        matches!(self, Unavailable::ModelNotReady)
+        matches!(self, Self::ModelNotReady)
     }
 }
 
 impl std::fmt::Display for Unavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let text = match self {
-            Unavailable::DeviceNotEligible => "device not eligible",
-            Unavailable::NotEnabled => "Apple Intelligence not enabled",
-            Unavailable::ModelNotReady => "model not ready",
-            Unavailable::OsTooOld => "macOS 26 or newer required",
-            Unavailable::Unknown => "unavailable",
-        };
-        f.write_str(text)
+        f.write_str(match self {
+            Self::DeviceNotEligible => "device not eligible",
+            Self::NotEnabled => "Apple Intelligence not enabled",
+            Self::ModelNotReady => "model not ready",
+            Self::OsTooOld => "macOS 26 or newer required",
+            Self::Unknown => "unavailable",
+        })
     }
 }
 
-/// Errors produced by the bridge.
+/// Everything a request can fail with.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// The `FMBridge` helper binary could not be found on disk.
-    #[error(
-        "FMBridge binary not found at {0}; build it with `swift build -c release --package-path swift` or set FM_BRIDGE_BIN"
-    )]
+    /// No helper binary at this path.
+    #[error("FMBridge helper not found at {}", .0.display())]
     BinaryNotFound(PathBuf),
 
-    /// The helper binary could not be launched.
-    #[error("failed to spawn the FMBridge process at {path}")]
+    /// The helper exists but couldn't be started.
+    #[error("failed to start FMBridge at {}", path.display())]
     Spawn {
-        /// Path we attempted to execute.
+        /// The binary that failed to start.
         path: PathBuf,
-        /// Underlying OS error.
+        /// The OS error.
         #[source]
         source: std::io::Error,
     },
 
-    /// An I/O error occurred while talking to the helper process.
-    #[error("i/o error while communicating with FMBridge")]
+    /// Reading from or writing to the helper failed.
+    #[error("i/o error talking to FMBridge")]
     Io(#[from] std::io::Error),
 
-    /// A payload could not be serialized or deserialized.
-    #[error("could not encode or decode the wire payload")]
+    /// A payload didn't encode or decode.
+    #[error("bad JSON payload")]
     Json(#[from] serde_json::Error),
 
-    /// Apple Intelligence is not usable on this machine right now.
-    ///
-    /// This is a configuration/hardware problem, not a bug in the caller's
-    /// request: the device may be ineligible, Apple Intelligence may be
-    /// switched off, or the model may still be downloading. Match on
-    /// [`reason`](Self::ModelUnavailable::reason) rather than the message when
-    /// deciding how to react — see [`Unavailable`].
+    /// Apple Intelligence can't run here right now.
     #[error("Apple Intelligence is unavailable: {message}")]
     ModelUnavailable {
-        /// Machine-readable cause, safe to branch on.
+        /// Stable cause; branch on this, not on `message`.
         reason: Unavailable,
-        /// Human-readable explanation from the helper, for display and logs.
+        /// Human-readable detail.
         message: String,
     },
 
-    /// The request was rejected before generation started.
+    /// The request was rejected before generation.
     #[error("invalid request: {0}")]
     BadRequest(String),
 
-    /// The supplied [`Schema`](crate::Schema) could not be validated.
+    /// The schema can't be built.
     #[error("invalid schema: {0}")]
     InvalidSchema(String),
 
-    /// Safety guardrails blocked the prompt or the response.
+    /// Safety guardrails blocked the prompt or the answer.
     #[error("blocked by safety guardrails: {0}")]
     GuardrailViolation(String),
 
-    /// The prompt plus the response exceeded the model's context window.
+    /// The model declined to answer.
+    #[error("the model refused: {0}")]
+    Refused(String),
+
+    /// The model can't work in the prompt's language.
+    #[error("unsupported language: {0}")]
+    UnsupportedLanguage(String),
+
+    /// Prompt plus answer outgrew the context window.
     #[error("context window exceeded: {0}")]
     ContextExceeded(String),
 
-    /// Generation failed for some other model-side reason.
+    /// The model is serving other work or is rate limited.
+    #[error("model busy: {0}")]
+    Busy(String),
+
+    /// Any other model-side failure.
     #[error("generation failed: {0}")]
     Generation(String),
 
-    /// The helper spoke something we could not interpret.
+    /// The helper said something this crate can't read.
     #[error("protocol error: {0}")]
     Protocol(String),
 
-    /// The helper exited without completing the response.
-    #[error("FMBridge exited unexpectedly (status {status}){}", format_stderr(.stderr))]
+    /// The helper exited before finishing.
+    #[error("FMBridge exited unexpectedly ({status}){}", stderr_suffix(.stderr))]
     ProcessFailed {
-        /// Exit status description.
+        /// How the process ended.
         status: String,
-        /// Whatever the helper wrote to stderr.
+        /// What it wrote to stderr.
         stderr: String,
     },
 
-    /// The request exceeded the configured timeout.
-    #[error("timed out after {0:?} waiting for FMBridge")]
-    Timeout(std::time::Duration),
+    /// Queueing plus generation took longer than the bridge timeout.
+    #[error("timed out after {0:?}")]
+    Timeout(Duration),
 }
 
-fn format_stderr(stderr: &str) -> String {
-    let trimmed = stderr.trim();
-    if trimmed.is_empty() {
-        String::new()
-    } else {
-        format!(": {trimmed}")
+fn stderr_suffix(stderr: &str) -> String {
+    match stderr.trim() {
+        "" => String::new(),
+        text => format!(": {text}"),
     }
 }
 
 impl Error {
-    /// Builds the appropriate variant from the helper's machine-readable code.
-    /// `reason` is the helper's optional unavailability token, only meaningful
-    /// for `model_unavailable`.
     pub(crate) fn from_code(code: &str, message: String, reason: Option<&str>) -> Self {
         match code {
-            "model_unavailable" => Error::ModelUnavailable {
+            "model_unavailable" => Self::ModelUnavailable {
                 reason: reason.map_or(Unavailable::Unknown, Unavailable::from_token),
                 message,
             },
-            "bad_request" => Error::BadRequest(message),
-            "schema_invalid" => Error::InvalidSchema(message),
-            "guardrail_violation" => Error::GuardrailViolation(message),
-            "context_exceeded" => Error::ContextExceeded(message),
-            "unsupported_locale" | "concurrent_requests" | "generation_failed" => {
-                Error::Generation(message)
-            }
-            _ => Error::Generation(message),
+            "bad_request" => Self::BadRequest(message),
+            "schema_invalid" => Self::InvalidSchema(message),
+            "guardrail_violation" => Self::GuardrailViolation(message),
+            "refusal" => Self::Refused(message),
+            "unsupported_locale" => Self::UnsupportedLanguage(message),
+            "context_exceeded" => Self::ContextExceeded(message),
+            "concurrent_requests" | "rate_limited" => Self::Busy(message),
+            _ => Self::Generation(message),
         }
     }
 
-    /// Returns `true` when retrying the same request later might succeed.
-    ///
-    /// Useful for callers that want to back off while the on-device model
-    /// finishes downloading rather than surfacing a hard failure.
+    /// Whether the same request may succeed later.
     pub fn is_retryable(&self) -> bool {
         match self {
-            // Only a model that is still being prepared is worth waiting for;
-            // an ineligible device or a disabled setting never resolves itself.
-            Error::ModelUnavailable { reason, .. } => reason.is_transient(),
-            Error::Timeout(_) => true,
-            Error::Generation(message) => message.contains("already responding"),
+            Self::ModelUnavailable { reason, .. } => reason.is_transient(),
+            Self::Timeout(_) | Self::Busy(_) => true,
             _ => false,
         }
     }
 }
 
-/// Convenient result alias.
+/// The crate's result type.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codes_map_to_variants() {
+        let cases = [
+            ("refusal", "Refused"),
+            ("unsupported_locale", "UnsupportedLanguage"),
+            ("concurrent_requests", "Busy"),
+            ("rate_limited", "Busy"),
+            ("something_new", "Generation"),
+        ];
+        for (code, variant) in cases {
+            let error = Error::from_code(code, "m".into(), None);
+            assert!(format!("{error:?}").starts_with(variant), "{code}");
+        }
+    }
+
+    #[test]
+    fn only_transient_causes_retry() {
+        let busy = Error::from_code("rate_limited", "m".into(), None);
+        let ready = Error::from_code("model_unavailable", "m".into(), Some("model_not_ready"));
+        let off = Error::from_code("model_unavailable", "m".into(), Some("not_enabled"));
+        let refused = Error::from_code("refusal", "m".into(), None);
+        assert!(busy.is_retryable() && ready.is_retryable());
+        assert!(!off.is_retryable() && !refused.is_retryable());
+    }
+
+    #[test]
+    fn unknown_reasons_degrade() {
+        let error = Error::from_code("model_unavailable", "m".into(), Some("new_reason"));
+        assert!(matches!(
+            error,
+            Error::ModelUnavailable {
+                reason: Unavailable::Unknown,
+                ..
+            }
+        ));
+    }
+}

@@ -1,11 +1,6 @@
-//! A multi-turn REPL that keeps conversation history in memory.
+//! A chat REPL; each turn replays the history.
 //!
-//! ```text
-//! FM_BRIDGE_BIN=swift/.build/release/FMBridge cargo run --example chat
-//! ```
-//!
-//! Each request spawns a fresh helper process, so history must be replayed on
-//! every turn — which is exactly what [`Request::messages`] is for.
+//! Run: `cargo run --example chat`
 
 use std::io::{BufRead, Write};
 

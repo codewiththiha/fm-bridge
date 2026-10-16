@@ -1,14 +1,7 @@
 import Foundation
 import FoundationModels
 
-/// Translates the wire `PropertyConfig` tree into Apple's `DynamicGenerationSchema`.
-///
-/// Notes on the real API surface (verified against the macOS 26 SDK):
-///   * `DynamicGenerationSchema.Property.init(name:description:schema:isOptional:)`
-///     — the parameter is `isOptional`, *not* `optionality:`.
-///   * `DynamicGenerationSchema.init(type:guides:)` is generic over a `Generable`
-///     value type and takes `[GenerationGuide<Value>]`.
-///   * `GenerationSchema.init(root:dependencies:)` **throws**.
+/// The wire `PropertyConfig` tree as a `DynamicGenerationSchema`.
 enum SchemaBuilder {
 
     static func buildRoot(from config: SchemaConfig) throws -> GenerationSchema {
@@ -16,7 +9,9 @@ enum SchemaBuilder {
             throw BridgeError.schemaInvalid("schema '\(config.name)' declares no properties")
         }
 
-        let rootProperties = try config.properties.map { try buildProperty(from: $0) }
+        let rootProperties = try config.properties.map {
+            try buildProperty(from: $0, path: config.name)
+        }
         let root = DynamicGenerationSchema(
             name: config.name,
             description: config.description,
@@ -30,16 +25,21 @@ enum SchemaBuilder {
         }
     }
 
-    static func buildProperty(from prop: PropertyConfig) throws -> DynamicGenerationSchema.Property {
+    static func buildProperty(
+        from prop: PropertyConfig, path: String
+    ) throws -> DynamicGenerationSchema.Property {
         DynamicGenerationSchema.Property(
             name: prop.name,
             description: prop.description,
-            schema: try buildSchema(from: prop),
+            schema: try buildSchema(from: prop, path: path + "_" + prop.name),
             isOptional: prop.optional ?? false
         )
     }
 
-    static func buildSchema(from prop: PropertyConfig) throws -> DynamicGenerationSchema {
+    /// `path` names nested objects uniquely across the whole schema.
+    static func buildSchema(
+        from prop: PropertyConfig, path: String
+    ) throws -> DynamicGenerationSchema {
         switch prop.type.lowercased() {
 
         case "object":
@@ -47,9 +47,9 @@ enum SchemaBuilder {
                 throw BridgeError.schemaInvalid("object property '\(prop.name)' has no nested properties")
             }
             return DynamicGenerationSchema(
-                name: uniqueName(for: prop),
+                name: sanitized(path),
                 description: prop.description,
-                properties: try nested.map { try buildProperty(from: $0) }
+                properties: try nested.map { try buildProperty(from: $0, path: path) }
             )
 
         case "array":
@@ -58,22 +58,18 @@ enum SchemaBuilder {
             }
             let (minimum, maximum) = arrayBounds(prop.count)
             return DynamicGenerationSchema(
-                arrayOf: try buildSchema(from: items.value),
+                arrayOf: try buildSchema(from: items.value, path: path + "_item"),
                 minimumElements: minimum,
                 maximumElements: maximum
             )
 
         case "string":
             var guides: [GenerationGuide<String>] = []
-            // `DynamicGenerationSchema.init(name:description:anyOf:)` unions
-            // *schemas*, not strings; a string enumeration is expressed as the
-            // `GenerationGuide<String>.anyOf([String])` guide instead.
+            // `init(name:description:anyOf:)` unions schemas, not strings.
             if let choices = prop.anyOf, !choices.isEmpty {
                 guides.append(.anyOf(choices))
             }
             if let pattern = prop.pattern {
-                // `GenerationGuide.pattern` needs a real `Regex`; an unparseable
-                // pattern is a caller error, so surface it rather than silently drop it.
                 do {
                     guides.append(.pattern(try Regex(pattern)))
                 } catch {
@@ -123,10 +119,8 @@ enum SchemaBuilder {
         return (minimum, maximum)
     }
 
-    /// Nested object schemas need names that are unique within one request;
-    /// property names are unique per level, so qualify them to avoid collisions.
-    private static func uniqueName(for prop: PropertyConfig) -> String {
-        let sanitized = prop.name
+    private static func sanitized(_ path: String) -> String {
+        let sanitized = path
             .unicodeScalars
             .map { CharacterSet.alphanumerics.contains($0) ? Character($0) : "_" }
             .reduce(into: "") { $0.append($1) }

@@ -1,9 +1,6 @@
-//! Streams a response token-by-token as the model produces it.
+//! Prints an answer as it streams.
 //!
-//! ```text
-//! swift build -c release --package-path swift
-//! FM_BRIDGE_BIN=swift/.build/release/FMBridge cargo run --example stream_text
-//! ```
+//! Run: `cargo run --example stream_text` after building the helper.
 
 use std::io::Write;
 

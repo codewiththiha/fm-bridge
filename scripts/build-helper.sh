@@ -1,18 +1,6 @@
 #!/usr/bin/env bash
-#
-# Builds a release FMBridge helper ready to embed in a distributable .app.
-#
-#   ./scripts/build-helper.sh [output-dir]
-#
-# Environment:
-#   SIGN_IDENTITY   Codesign identity, e.g. "Developer ID Application: Acme (TEAMID)".
-#                   Defaults to "-" (ad-hoc), which is fine locally but will NOT
-#                   pass Gatekeeper on another Mac.
-#   BUNDLE_ID       Code signing identifier for the helper. Should be your app's
-#                   bundle ID plus a suffix, e.g. com.acme.MyApp.FMBridge.
-#   SANDBOX         Set to 1 if the host app is sandboxed, so the helper inherits
-#                   the sandbox (required for the Mac App Store).
-#
+# Builds and signs a release helper: build-helper.sh [out-dir]
+# README "Shipping" lists its environment.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,17 +13,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
-# Prefer Xcode over the Command Line Tools.
-#
-# FoundationModels only ships in the macOS 26 SDK, which lives inside Xcode.app.
-# Building under the CLT also produces these benign linker warnings, because
-# SwiftPM passes -L/-F paths that exist only inside Xcode:
-#
-#   ld: warning: search path '.../CommandLineTools/Developer/usr/lib' not found
-#
-# If DEVELOPER_DIR is already set we honour it; otherwise, when the active
-# toolchain is the CLT, fall back to an Xcode that actually carries a macOS 26
-# SDK. Newest wins, and /Applications/Xcode.app is considered too.
+# FoundationModels ships only in Xcode's macOS 26 SDK, never in the CLT.
 if [[ -z "${DEVELOPER_DIR:-}" ]]; then
   active="$(xcode-select -p 2>/dev/null || true)"
   if [[ "$active" != *"/Xcode"*".app/Contents/Developer" ]]; then
@@ -83,8 +61,7 @@ mkdir -p "$OUT_DIR"
 cp -f "$BUILT_BIN" "$OUT_DIR/FMBridge"
 TARGET="$OUT_DIR/FMBridge"
 
-# A sandboxed host app requires the helper to inherit the sandbox, otherwise the
-# system refuses to launch it as a child of the app.
+# A sandboxed app can't launch a helper that doesn't inherit the sandbox.
 CODESIGN_ARGS=(
   --sign "$SIGN_IDENTITY"
   --identifier "$BUNDLE_ID"

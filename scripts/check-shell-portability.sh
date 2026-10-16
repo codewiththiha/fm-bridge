@@ -1,22 +1,6 @@
 #!/usr/bin/env bash
-#
-# Guard against shell constructs that macOS's bash 3.2 cannot run.
-#
-# macOS still ships bash 3.2 (bash 4 moved to GPLv3 and Apple never shipped
-# it), so every script in this repo has to parse under it -- `build-helper.sh`
-# in particular runs on a Mac. Modern bash and dash both ACCEPT constructs that
-# bash 3.2 rejects -- notably `case` inside `$( )` -- so linting with the local
-# shell proves nothing. This script scans for the specific constructs that have
-# caused real breakage before.
-#
-# If a GitHub workflow is ever added back, its `run:` blocks are extracted and
-# scanned too.
-#
-# Optional but recommended: set BASH32 to a real bash 3.2 binary and every file
-# is additionally parsed with it, which is the only authoritative check.
-#
-#   ./scripts/check-shell-portability.sh
-#   BASH32=/path/to/bash-3.2/bash ./scripts/check-shell-portability.sh
+# Rejects what macOS's bash 3.2 can't parse.
+# BASH32=/path/to/bash-3.2 parses every file with it too.
 set -uo pipefail
 
 cd "$(dirname "$0")/.."
@@ -76,16 +60,13 @@ for file in $targets; do
     fail "$label: bash 4 only construct (declare -A / mapfile / case modification)"
   fi
 
-  # bash 3.2 misparses `case` inside $( ): the pattern's ')' ends the
-  # substitution early and the parse dies on the following ';;'. Track how
-  # many command substitutions are open and flag any `case` seen inside one.
+  # bash 3.2 ends $( ) at a case pattern's ')' and dies on ';;'.
   if echo "$code" | awk '
       {
         line = $0
         opens = gsub(/\$\(/, "&", line)
         closes = gsub(/\)/, "&", line)
-        # Only a substitution still open at end-of-line can swallow a later
-        # `case`; same-line $( ... ) pairs close themselves.
+        # Same-line $( ) pairs close themselves.
         if (depth > 0 && line ~ /(^|[;[:space:]])case[[:space:]]/) bad = 1
         depth += opens - closes
         if (depth < 0) depth = 0

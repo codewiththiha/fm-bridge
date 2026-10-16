@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Emits framework chatter and unknown event kinds alongside real events, to
-# prove the parser ignores anything it does not recognise.
+# Real events mixed with chatter and unknown kinds.
 set -euo pipefail
 read -r _request || true
 

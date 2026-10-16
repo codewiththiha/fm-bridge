@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Mimics FMBridge streaming a plain-text response.
-# Reads (and discards) one JSON request line, then emits NDJSON deltas.
+# Streams a plain-text answer.
 set -euo pipefail
 read -r _request || true
 

@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Mimics `FMBridge --probe`. Set MOCK_UNAVAILABLE to a reason token
-# (device_not_eligible | not_enabled | model_not_ready) to simulate a Mac that
-# cannot serve requests; "1" is accepted as a legacy alias for not_enabled.
+# Mimics `FMBridge --probe`; MOCK_UNAVAILABLE names a reason token.
 set -euo pipefail
 
 reason="${MOCK_UNAVAILABLE:-}"

@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - Wire Protocol (must stay in sync with the Rust crate's `types.rs`)
+// MARK: - Wire protocol; mirrors the Rust crate's `src/wire.rs`
 
 /// A single chat message. `role` is one of "system", "user", "assistant".
 struct BridgeMessage: Codable, Sendable {
@@ -8,7 +8,7 @@ struct BridgeMessage: Codable, Sendable {
     let content: String
 }
 
-/// Recursive description of a JSON schema node, mirroring Rust's `SchemaProperty`.
+/// One schema node; mirrors Rust's `SchemaProperty`.
 struct PropertyConfig: Codable, Sendable {
     let name: String
     let description: String?
@@ -30,8 +30,7 @@ struct PropertyConfig: Codable, Sendable {
     let optional: Bool?
 }
 
-/// `PropertyConfig` cannot directly contain itself in a stored property, so array
-/// element schemas are wrapped in a reference box.
+/// A box: a struct can't store itself.
 final class IndirectProperty: Codable, Sendable {
     let value: PropertyConfig
 
@@ -68,8 +67,7 @@ struct BridgeRequest: Codable, Sendable {
 // MARK: - Outbound events
 
 enum Outbound {
-    /// Writes one NDJSON line to stdout and flushes immediately so the Rust
-    /// side sees each event as it happens rather than at process exit.
+    /// One line, written unbuffered so Rust sees it at once.
     static func emit(_ object: [String: Any]) {
         guard JSONSerialization.isValidJSONObject(object),
               let data = try? JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes]),
@@ -114,8 +112,7 @@ enum Outbound {
     }
 }
 
-/// Errors the bridge reports with a stable machine-readable `code` so the Rust
-/// side can map them onto typed variants instead of string matching.
+/// An error with a stable `code` Rust maps to a variant.
 struct BridgeError: Error {
     let code: String
     let message: String

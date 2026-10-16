@@ -1,8 +1,6 @@
-//! Generates a JSON object that is guaranteed to match a runtime-defined schema.
+//! An object guaranteed to match a runtime schema.
 //!
-//! ```text
-//! FM_BRIDGE_BIN=swift/.build/release/FMBridge cargo run --example structured_json
-//! ```
+//! Run: `cargo run --example structured_json`
 
 use fm_bridge::{Bridge, Request, Schema, SchemaProperty};
 use serde::Deserialize;

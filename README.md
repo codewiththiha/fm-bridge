@@ -4,7 +4,7 @@ Async Rust bindings for Apple's on-device **Foundation Models** framework — th
 
 Apple ships `FoundationModels` as a Swift-only framework with no C ABI, so this crate pairs a small Swift helper binary with a pure Rust library. They speak newline-delimited JSON over stdin/stdout.
 
-```rust
+```rust,ignore
 use fm_bridge::{Bridge, Request};
 
 let bridge = Bridge::from_env()?;
@@ -33,7 +33,7 @@ println!("{}", response.text);
 | OS | macOS 26 (Tahoe) or later |
 | Setting | Apple Intelligence enabled in System Settings |
 | Toolchain | Swift 6.2+ (Xcode 26) to build the helper |
-| Rust | 1.85 or later (the crate uses edition 2024) |
+| Rust | 1.88 or later (edition 2024, let chains) |
 
 The model is not available on Intel Macs, and it will report itself unavailable while macOS is still downloading it.
 
@@ -41,7 +41,7 @@ The model is not available on Intel Macs, and it will report itself unavailable 
 
 ```toml
 [dependencies]
-fm-bridge = "0.1"
+fm-bridge = { git = "https://github.com/codewiththiha/fm-bridge" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -54,17 +54,19 @@ export FM_BRIDGE_BIN="$PWD/swift/.build/release/FMBridge"
 
 Then locate it from Rust:
 
-```rust
+```rust,ignore
 let bridge = Bridge::from_env()?;   // reads FM_BRIDGE_BIN
 let bridge = Bridge::discover()?;   // env var, then swift/.build, then PATH
 let bridge = Bridge::new("/path/to/FMBridge");
 ```
 
-Check the model is actually usable before you rely on it:
+Check the model is actually usable before you rely on it. The probe also
+reports the context window and the languages the model speaks:
 
-```rust
+```rust,ignore
 match bridge.check_availability().await {
-    Ok(()) => println!("ready"),
+    Ok(model) if model.supports("en") => println!("ready, {:?} tokens", model.context_size),
+    Ok(_) => println!("ready, but not in English"),
     Err(error) => eprintln!("unavailable: {error}"),
 }
 ```
@@ -72,11 +74,11 @@ match bridge.check_availability().await {
 When it fails, branch on the *reason* rather than the message — the wording is
 for humans and may change, the token will not:
 
-```rust
+```rust,ignore
 use fm_bridge::{Error, Unavailable};
 
 match bridge.check_availability().await {
-    Ok(()) => { /* go ahead */ }
+    Ok(_) => { /* go ahead */ }
     Err(Error::ModelUnavailable { reason, message }) => match reason {
         // Transient: assets are still coming down. Back off and retry.
         Unavailable::ModelNotReady => schedule_retry(),
@@ -98,7 +100,7 @@ match bridge.check_availability().await {
 
 ### Streaming text
 
-```rust
+```rust,ignore
 use fm_bridge::{Bridge, Request, StreamEvent};
 use futures::StreamExt;
 
@@ -118,7 +120,7 @@ while let Some(event) = stream.next().await {
 
 ### Structured output
 
-```rust
+```rust,ignore
 use fm_bridge::{Request, Schema, SchemaProperty};
 use serde::Deserialize;
 
@@ -160,11 +162,35 @@ Descriptions are not decoration — they are the main lever you have for steerin
 
 Nest with `SchemaProperty::object(name, props)` and `SchemaProperty::array(name, items)`.
 
+### JSON Schema
+
+One schema can serve every provider: `Schema::from_json` reads the standard
+JSON Schema an HTTP API takes, so a prompt and its shape are written once.
+
+```rust,ignore
+let shape = serde_json::json!({
+    "type": "object",
+    "properties": {
+        "meaning": {"type": "string", "description": "Plain words"},
+        "synonyms": {"type": "array", "items": {"type": "string"}, "maxItems": 5}
+    },
+    "required": ["meaning", "synonyms"]
+});
+let schema = Schema::from_json("Word", &shape)?;
+```
+
+Read: `type` (one type, optionally with `"null"`), `properties`, `required`
+(absent fields become optional), `description`, `enum` (strings), `pattern`,
+`minimum` with `maximum`, `minItems`/`maxItems`, `items`, and local `$ref`s
+into `$defs` or `definitions`. Other keywords are ignored. Property order is
+kept, and it matters: the model generates fields in order. Nesting is capped
+at `MAX_DEPTH` and `$ref` cycles are rejected.
+
 ### Streaming structured output
 
 Structured requests do **not** stream by default — `stream()` returns `Error::BadRequest` unless you opt in:
 
-```rust
+```rust,ignore
 let request = Request::new().user("Invent a dish.").schema(schema).stream_structured(true);
 
 while let Some(event) = stream.next().await {
@@ -182,7 +208,7 @@ Snapshots are partially-filled objects: fields not yet generated are absent or n
 
 Each request spawns a fresh helper process, so there is no server-side session. Replay the history yourself:
 
-```rust
+```rust,ignore
 let mut history = vec![Message::system("You are terse.")];
 history.push(Message::user("What's the capital of France?"));
 
@@ -194,7 +220,7 @@ history.push(Message::assistant(response.text));
 
 ### Generation options
 
-```rust
+```rust,ignore
 use fm_bridge::{Request, Sampling};
 
 Request::new()
@@ -207,7 +233,7 @@ Request::new()
 
 Set a per-request wall-clock limit on the bridge itself (default five minutes):
 
-```rust
+```rust,ignore
 let bridge = Bridge::discover()?.timeout(std::time::Duration::from_secs(30));
 ```
 
@@ -215,7 +241,7 @@ let bridge = Bridge::discover()?.timeout(std::time::Duration::from_secs(30));
 
 A bridge runs **one request at a time** by default. The on-device model is a single shared resource, so fanning out is something you ask for rather than something you get by accident:
 
-```rust
+```rust,ignore
 let bridge = Bridge::discover()?.max_concurrency(4);
 
 let tasks: Vec<_> = prompts
@@ -250,13 +276,14 @@ Keep the number modest. Each slot is a separate helper process contending for on
 
 ## Error handling
 
-```rust
+```rust,ignore
 use fm_bridge::Error;
 
 match bridge.complete(request).await {
     Ok(response) => println!("{}", response.text),
-    Err(Error::ModelUnavailable(why)) => eprintln!("Apple Intelligence is off: {why}"),
-    Err(Error::GuardrailViolation(_)) => eprintln!("blocked by safety filters"),
+    Err(Error::ModelUnavailable { reason, .. }) => eprintln!("unavailable: {reason}"),
+    Err(Error::GuardrailViolation(_) | Error::Refused(_)) => eprintln!("declined"),
+    Err(Error::UnsupportedLanguage(_)) => eprintln!("try another language or provider"),
     Err(Error::ContextExceeded(_)) => eprintln!("prompt too long — trim the history"),
     Err(Error::InvalidSchema(why)) => eprintln!("bad schema: {why}"),
     Err(error) if error.is_retryable() => eprintln!("try again shortly: {error}"),
@@ -264,13 +291,16 @@ match bridge.complete(request).await {
 }
 ```
 
+`is_retryable()` is true for a timeout, a busy or rate-limited model, and a
+model that is still downloading.
+
 Malformed requests and invalid schemas are caught in Rust *before* a process is spawned.
 
 > **Note on token counts.** Apple exposes no tokenizer or token-count API to third-party code. Every `Usage` figure is **estimated** from character length (~4 chars/token). Use it for rough budgeting only, never for billing.
 
 ## Architecture
 
-```
+```text
 ┌─────────────┐   JSON request (1 line, stdin)   ┌──────────────────┐
 │  Rust crate │ ───────────────────────────────► │  Bridge     │
 │             │                                  │  (Swift binary)  │
@@ -304,7 +334,7 @@ Response events, one JSON object per line:
 | `{"error":"...","code":"...","reason":"..."}` | Failure (`reason` only on `model_unavailable`) |
 | `{"ready":{"available":true,"contextSize":N,"supportedLanguages":[...]}}` | Reply to `--probe` |
 
-Error codes: `model_unavailable`, `bad_request`, `schema_invalid`, `guardrail_violation`, `context_exceeded`, `generation_failed`, `unsupported_locale`, `concurrent_requests`. Unknown codes degrade to `Error::Generation`, so the helper can add new ones without breaking older crates.
+Error codes: `model_unavailable`, `bad_request`, `schema_invalid`, `guardrail_violation`, `refusal`, `context_exceeded`, `generation_failed`, `unsupported_locale`, `concurrent_requests`, `rate_limited`. Unknown codes degrade to `Error::Generation`, so the helper can add new ones without breaking older crates.
 
 Unavailability reasons: `device_not_eligible`, `not_enabled`, `model_not_ready`, `os_too_old`. These map onto [`Unavailable`]; an unrecognised token becomes `Unavailable::Unknown` rather than being mistaken for a known cause.
 
@@ -345,7 +375,7 @@ End users have no Swift toolchain, so the helper is built once by you and embedd
 
 Do **not** bother with a universal binary. Apple Intelligence is Apple-silicon-only, so an `x86_64` slice could never reach an available model; on an Intel Mac the helper would exit with `model_unavailable` either way. Build `arm64` only and gate the feature at runtime instead:
 
-```rust
+```rust,ignore
 if bridge.check_availability().await.is_ok() {
     // show the AI features
 }
@@ -394,13 +424,13 @@ spctl --assess --type execute -vv YourApp.app
 
 Use `Bridge::bundled()`, not `discover()` or `from_env()`:
 
-```rust
+```rust,ignore
 let bridge = Bridge::bundled()?;
 ```
 
 It resolves the helper strictly relative to the running executable — `Contents/MacOS/FMBridge`, then `Contents/Resources/FMBridge` — and canonicalizes the result. `discover()` and `from_env()` consult `PATH`, the working directory, and `$FM_BRIDGE_BIN`; those are conveniences for development, and none of them belong in a shipped app, where they let whoever launches your process choose which binary you execute. Keep `discover()` for your own `cargo run` workflow and `bundled()` for release builds:
 
-```rust
+```rust,ignore
 let bridge = if cfg!(debug_assertions) {
     Bridge::discover()?
 } else {
@@ -491,16 +521,9 @@ macOS 26 cycle, so which spelling is correct depends on your SDK:
 | `init(samplingMode:temperature:maximumResponseTokens:)` | macOS 26.0+, `@backDeployed(before: macOS 27.0)`; missing from early 26.x SDKs |
 | `init(sampling:temperature:maximumResponseTokens:)` | Present in every 26.x SDK; **deprecated** in recent ones |
 
-The helper calls `samplingMode:`. Because it is `@backDeployed`, the compiler
-emits the implementation into the binary, so it still runs on macOS 26 — the
-newer label costs nothing at runtime.
-
-If you build against an early 26.x SDK from before the rename, you will get
-`error: incorrect argument label in call (have 'samplingMode:', expected
-'sampling:')`. Change the one call in
-`swift/Sources/FMBridge/FMBridgeMain.swift` back to `sampling:`; the two
-initializers are otherwise identical. That spelling compiles everywhere but
-emits a deprecation warning on current SDKs.
+The helper calls `sampling:`, the one spelling every 26.x SDK accepts, so a
+deprecation warning on a recent SDK is expected and harmless. Both labels
+build the same options.
 
 If you hit this with a different symbol, check your SDK version and compare it
 against the "iOS 26.x+ / macOS 26.x+" line on the API's documentation page:
@@ -588,6 +611,11 @@ seal. Rebuild with `scripts/build-helper.sh` and re-sign inside-out.
 
 If your app is sandboxed and the helper exits instantly, it is missing
 `com.apple.security.inherit`; rebuild with `SANDBOX=1`.
+
+## Contributing
+
+Agents and people follow [AGENTS.md](AGENTS.md): short comments, short
+conventional commits, and the gates CI runs.
 
 ## License
 

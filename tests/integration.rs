@@ -1,10 +1,5 @@
-//! End-to-end tests against mock helper binaries.
-//!
-//! Apple Intelligence requires real Apple Silicon hardware with the model
-//! downloaded, which no CI runner has. These tests therefore drive the real
-//! IPC code path — spawn, stdin write, NDJSON parse, exit-status handling —
-//! against bash scripts in `scripts/` that reproduce the helper's stdout
-//! byte-for-byte.
+//! The real IPC path against bash mocks of the helper in `scripts/`.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,8 +17,7 @@ fn mock(name: &str) -> Bridge {
     Bridge::new(path)
 }
 
-/// Writes a wrapper script that runs `script` with extra environment variables,
-/// so tests stay parallel-safe instead of mutating the process environment.
+/// Runs `script` with `vars` set, without touching this process's environment.
 fn mock_with_env(script: &str, vars: &[(&str, &str)]) -> (tempfile::TempDir, Bridge) {
     let dir = tempfile::tempdir().expect("create tempdir");
     let wrapper = dir.path().join("wrapper.sh");
@@ -61,7 +55,7 @@ async fn collect(bridge: &Bridge, request: Request) -> Vec<StreamEvent> {
     events
 }
 
-// ── Text ────────────────────────────────────────────────────────────────────
+// Text
 
 #[tokio::test]
 async fn complete_concatenates_streamed_deltas() {
@@ -103,12 +97,10 @@ async fn ignores_unknown_events_and_stray_stdout() {
         .await
         .expect("completion");
 
-    // The `objc[...]` warning, the blank line, the `ready` event, and the
-    // unknown `someFutureEvent` must all be skipped.
     assert_eq!(response.text, "real text");
 }
 
-// ── Structured ──────────────────────────────────────────────────────────────
+// Structured
 
 fn recipe_schema() -> Schema {
     Schema::new(
@@ -193,10 +185,9 @@ async fn structured_streaming_emits_snapshots_then_final_object() {
     assert!(matches!(events.last(), Some(StreamEvent::Done(_))));
 }
 
-// ── Wire format ─────────────────────────────────────────────────────────────
+// Wire format
 
-/// Round-trips a request through the echo mock to assert on the exact bytes
-/// the crate writes to the helper's stdin.
+/// The request exactly as the helper received it.
 async fn echoed_request(request: Request) -> serde_json::Value {
     let bridge = mock("mock_echo_request.sh");
     let response: Completion = bridge.complete(request).await.expect("completion");
@@ -233,7 +224,6 @@ async fn writes_expected_wire_format_for_text_requests() {
 async fn writes_expected_wire_format_for_structured_requests() {
     let sent = echoed_request(Request::new().user("hi").schema(recipe_schema())).await;
 
-    // Non-streaming structured requests must not ask the helper to stream.
     assert_eq!(sent["stream"], false);
     assert_eq!(sent["schema"]["name"], "Recipe");
     assert_eq!(sent["schema"]["properties"][1]["type"], "integer");
@@ -251,7 +241,7 @@ async fn greedy_sampling_is_sent_as_a_flag() {
     assert!(sent.get("seed").is_none());
 }
 
-// ── Errors ──────────────────────────────────────────────────────────────────
+// Errors
 
 #[tokio::test]
 async fn typed_error_codes_map_to_error_variants() {
@@ -354,8 +344,7 @@ async fn missing_binary_is_reported_clearly() {
 
 #[tokio::test]
 async fn requests_are_validated_before_spawning() {
-    // Validation must fail even though the binary path is bogus, proving no
-    // process is spawned for a malformed request.
+    // A bogus path proves nothing was spawned.
     let bridge = Bridge::new("/nonexistent/path/to/FMBridge");
 
     let no_user_turn = bridge
@@ -401,15 +390,14 @@ async fn slow_helpers_hit_the_timeout() {
     assert!(matches!(last, Some(Err(Error::Timeout(_)))), "got {last:?}");
 }
 
-// ── Availability probe ──────────────────────────────────────────────────────
+// Availability probe
 
 #[tokio::test]
 async fn probe_succeeds_when_the_model_is_ready() {
     let bridge = mock("mock_probe.sh");
-    bridge
-        .check_availability()
-        .await
-        .expect("probe should succeed");
+    let model = bridge.check_availability().await.expect("probe");
+    assert_eq!(model.context_size, Some(4096));
+    assert!(model.supports("es"));
 }
 
 #[tokio::test]
@@ -426,8 +414,6 @@ async fn probe_reports_why_the_model_is_unavailable() {
     }
 }
 
-/// A model that is still downloading is worth retrying; an ineligible device
-/// never becomes eligible, so the two must not be conflated.
 #[tokio::test]
 async fn probe_distinguishes_transient_from_permanent_unavailability() {
     let cases = [
@@ -453,8 +439,6 @@ async fn probe_distinguishes_transient_from_permanent_unavailability() {
     }
 }
 
-/// An unrecognised reason token must degrade to `Unknown` rather than being
-/// misread as one of the known causes.
 #[tokio::test]
 async fn probe_tolerates_an_unknown_unavailability_reason() {
     let (_dir, bridge) = mock_with_env("mock_probe.sh", &[("MOCK_UNAVAILABLE", "from_the_future")]);
@@ -467,7 +451,7 @@ async fn probe_tolerates_an_unknown_unavailability_reason() {
     assert!(!error.is_retryable());
 }
 
-// ── Process hygiene ─────────────────────────────────────────────────────────
+// Process hygiene
 
 #[tokio::test]
 async fn dropping_a_stream_early_does_not_leak_the_child() {
@@ -477,7 +461,6 @@ async fn dropping_a_stream_early_does_not_leak_the_child() {
     let first = stream.next().await.expect("first event").expect("ok");
     assert_eq!(first, StreamEvent::Delta("tick".into()));
 
-    // `kill_on_drop(true)` must reap the helper as soon as the stream is gone.
     drop(stream);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -507,19 +490,13 @@ async fn concurrent_requests_are_independent() {
     }
 }
 
-/// `from_env` is exercised in a child process rather than by mutating this
-/// one's environment: `set_var` is `unsafe` in edition 2024 (it can race with a
-/// concurrent `getenv` in another thread), and this crate forbids `unsafe`.
-/// Spawning gives the same coverage with none of the hazard, and additionally
-/// proves the variable is read at the process boundary the way callers use it.
+/// Runs in a child process: `set_var` is `unsafe` in edition 2024.
 #[tokio::test]
 async fn from_env_reads_the_binary_path() {
     let mock: PathBuf = [env!("CARGO_MANIFEST_DIR"), "scripts", "mock_text_stream.sh"]
         .iter()
         .collect();
 
-    // Re-runs this same test binary with the variable set, filtered down to the
-    // helper test below, which is `#[ignore]`d during a normal run.
     let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
         .args(["--exact", "env_var_helper", "--ignored", "--nocapture"])
         .env(fm_bridge::BINARY_ENV_VAR, &mock)
@@ -538,15 +515,13 @@ async fn from_env_reads_the_binary_path() {
     );
 }
 
-/// Helper for [`from_env_reads_the_binary_path`]; only meaningful with
-/// `FM_BRIDGE_BIN` set, so it is skipped in ordinary runs.
+/// The child half of [`from_env_reads_the_binary_path`].
 #[tokio::test]
 #[ignore = "spawned by from_env_reads_the_binary_path with the env var set"]
 async fn env_var_helper() {
     let bridge = Bridge::from_env().expect("from_env");
     println!("resolved={}", bridge.binary_path().display());
 
-    // The path really is usable, not just parsed.
     let response = bridge
         .complete(Request::new().user("hi"))
         .await
@@ -554,7 +529,7 @@ async fn env_var_helper() {
     assert_eq!(response.text, "Hello, world!");
 }
 
-// ── Concurrency ─────────────────────────────────────────────────────────────
+// Concurrency
 
 #[tokio::test]
 async fn concurrency_defaults_to_one() {
@@ -572,7 +547,6 @@ async fn zero_concurrency_is_clamped_to_one() {
     let bridge = mock("mock_text_stream.sh").max_concurrency(0);
     assert_eq!(bridge.max_concurrency_limit(), 1);
 
-    // Still functional rather than deadlocked.
     let response = bridge
         .complete(Request::new().user("hi"))
         .await
@@ -582,7 +556,6 @@ async fn zero_concurrency_is_clamped_to_one() {
 
 #[tokio::test]
 async fn the_default_limit_serializes_requests() {
-    // Each helper reports its own start/end, so overlap is observable.
     let (_dir, bridge) = mock_with_env("mock_concurrency_probe.sh", &[("MOCK_HOLD_MS", "150")]);
 
     let started = std::time::Instant::now();
@@ -597,7 +570,6 @@ async fn the_default_limit_serializes_requests() {
         handle.await.expect("task").expect("completion");
     }
 
-    // Three 150 ms requests run one at a time: comfortably over 300 ms.
     assert!(
         started.elapsed() >= Duration::from_millis(300),
         "requests appear to have overlapped under the default limit of 1 ({:?})",
@@ -623,7 +595,6 @@ async fn raising_the_limit_allows_overlap() {
         handle.await.expect("task").expect("completion");
     }
 
-    // Four 300 ms requests in parallel finish in far less than 1.2 s.
     assert!(
         started.elapsed() < Duration::from_millis(900),
         "requests did not overlap despite a limit of 4 ({:?})",
@@ -650,8 +621,7 @@ async fn clones_share_one_concurrency_budget() {
         handle.await.expect("task").expect("completion");
     }
 
-    // Three requests through a shared 2-slot budget need two waves, so the
-    // clones cannot each have got their own budget.
+    // Two slots for three requests take two waves.
     assert!(
         started.elapsed() >= Duration::from_millis(400),
         "clones did not share the limit ({:?})",
@@ -661,9 +631,6 @@ async fn clones_share_one_concurrency_budget() {
 
 #[tokio::test]
 async fn every_response_reaches_its_own_caller() {
-    // The strongest guarantee to hold under concurrency: with many requests in
-    // flight through one bridge, each caller must receive the reply to *its*
-    // prompt. The mock echoes back the request it was handed.
     let bridge = mock("mock_echo_request.sh").max_concurrency(4);
 
     let handles: Vec<_> = (0..24)
@@ -703,8 +670,6 @@ async fn streams_release_their_slot_when_dropped() {
     stream.next().await.expect("first event").expect("ok");
     assert_eq!(bridge.available_slots(), 0, "stream should hold the slot");
 
-    // Abandoning the stream must hand the slot back, or the bridge would wedge
-    // permanently after any cancelled request.
     drop(stream);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
@@ -721,12 +686,9 @@ async fn a_saturated_bridge_times_out_instead_of_hanging() {
         .max_concurrency(1)
         .timeout(Duration::from_millis(400));
 
-    // Occupy the single slot with a request that will not finish.
     let mut held = Box::pin(bridge.stream(Request::new().user("first")));
     held.next().await.expect("first event").expect("ok");
 
-    // A second caller waits for the slot and gives up at the timeout rather
-    // than queueing indefinitely.
     let started = std::time::Instant::now();
     let error = bridge
         .complete(Request::new().user("second"))
@@ -751,7 +713,6 @@ async fn a_freed_slot_is_handed_to_the_next_waiter() {
         tokio::spawn(async move { bridge.complete(Request::new().user("first")).await })
     };
 
-    // Give the first request time to take the only slot.
     tokio::time::sleep(Duration::from_millis(50)).await;
     let second = {
         let bridge = bridge.clone();
@@ -761,7 +722,6 @@ async fn a_freed_slot_is_handed_to_the_next_waiter() {
     first.await.expect("task").expect("first completion");
     second.await.expect("task").expect("second completion");
 
-    // Both finished, and the budget is fully restored.
     assert_eq!(bridge.available_slots(), 1);
 }
 
@@ -773,7 +733,6 @@ async fn streaming_a_structured_request_requires_opting_in() {
     let error = stream.next().await.expect("one item").unwrap_err();
     assert!(matches!(error, Error::BadRequest(m) if m.contains("stream_structured")));
 
-    // With the opt-in it streams normally.
     let bridge = mock("mock_structured_stream.sh");
     let events = collect(
         &bridge,
@@ -784,4 +743,85 @@ async fn streaming_a_structured_request_requires_opting_in() {
     )
     .await;
     assert!(events.iter().any(|e| matches!(e, StreamEvent::Snapshot(_))));
+}
+
+#[tokio::test]
+async fn newer_error_codes_get_their_own_variants() {
+    let cases = [
+        ("refusal", "Refused"),
+        ("unsupported_locale", "UnsupportedLanguage"),
+        ("rate_limited", "Busy"),
+        ("concurrent_requests", "Busy"),
+    ];
+    for (code, variant) in cases {
+        let (_dir, bridge) = mock_with_env("mock_error.sh", &[("MOCK_ERROR_CODE", code)]);
+        let error = bridge
+            .complete(Request::new().user("hi"))
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").starts_with(variant),
+            "{code}: {error:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_probe_without_a_reply_is_a_protocol_error() {
+    let bridge = mock("mock_text_stream.sh");
+    let error = bridge.check_availability().await.unwrap_err();
+    assert!(matches!(error, Error::Protocol(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_slow_probe_times_out() {
+    let (_dir, bridge) = mock_with_env("mock_slow.sh", &[("MOCK_SLEEP_SECONDS", "30")]);
+    let bridge = bridge.timeout(Duration::from_millis(300));
+    let error = bridge.check_availability().await.unwrap_err();
+    assert!(matches!(error, Error::Timeout(_)), "{error:?}");
+}
+
+#[tokio::test]
+async fn a_json_schema_round_trips_to_the_helper() {
+    let json = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "pos": {"type": "string", "description": "Part of speech"},
+            "meaning": {"type": "string"}
+        },
+        "required": ["pos", "meaning"]
+    });
+    let schema = Schema::from_json("Word", &json).expect("schema");
+    let sent = echoed_request(Request::new().user("hi").schema(schema)).await;
+    let fields = &sent["schema"]["properties"];
+    assert_eq!(fields[0]["name"], "pos");
+    assert_eq!(fields[0]["description"], "Part of speech");
+    assert_eq!(fields[1]["name"], "meaning");
+}
+
+/// The real helper, when `FM_BRIDGE_BIN` names one; CI's macOS job sets it.
+fn real_helper() -> Option<Bridge> {
+    Bridge::from_env()
+        .ok()
+        .filter(|b| b.binary_path().is_file())
+}
+
+#[tokio::test]
+async fn the_real_helper_reads_our_requests() {
+    let Some(bridge) = real_helper() else {
+        return;
+    };
+    let accepted = |result: Result<(), Error>| match result {
+        Ok(()) | Err(Error::ModelUnavailable { .. }) => {}
+        Err(other) => panic!("the helper rejected the request: {other:?}"),
+    };
+    accepted(bridge.check_availability().await.map(drop));
+    let shaped = Request::new()
+        .system("Be brief.")
+        .user("Name a seabird.")
+        .temperature(0.2)
+        .max_tokens(32)
+        .sampling(Sampling::Greedy)
+        .schema(recipe_schema());
+    accepted(bridge.complete(shaped).await.map(drop));
 }
