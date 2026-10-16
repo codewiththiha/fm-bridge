@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Lint
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+      - name: Shell portability
+        run: ./scripts/check-shell-portability.sh
+      - name: Comments
+        run: python3 tools/comment_check.py
+      - name: Commit subjects
+        run: python3 tools/commit_check.py --range HEAD
+
+  msrv:
+    name: MSRV 1.88
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - name: Check
+        run: cargo check --all-targets
+
+  swift:
+    name: Swift helper
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain
+        run: xcodebuild -version && xcrun --sdk macosx --show-sdk-version
+      - name: Build helper
+        run: swift build -c release --package-path swift
+      - name: Probe
+        run: |
+          set +e
+          swift/.build/release/FMBridge --probe
+          code=$?
+          echo "probe exit $code"
+          test "$code" -eq 0 || test "$code" -eq 3
+      - name: Test under bash 3.2, then against the real helper
+        run: |
+          cargo test
+          FM_BRIDGE_BIN="$PWD/swift/.build/release/FMBridge" cargo test real_helper
